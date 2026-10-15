@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Giám Sát Vườn Cây Công Nghiệp (Siêu Tốc)</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.0.1/mqttws31.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    :root {
+      --bg-color: #f4f7f6;
+      --card-bg: #ffffff;
+      --primary: #2e7d32;
+      --temp-color: #e53935;
+      --hum-color: #1e88e5;
+    }
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background-color: var(--bg-color);
+      margin: 0;
+      padding: 20px;
+      color: #333;
+    }
+    .header {
+      text-align: center;
+      background: var(--primary);
+      color: white;
+      padding: 15px;
+      border-radius: 10px;
+      margin-bottom: 20px;
+      box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+    }
+    .header h1 { margin: 0; font-size: 24px; }
+    .status-bar { margin-top: 8px; font-size: 14px; }
+    .badge {
+      padding: 4px 10px;
+      border-radius: 12px;
+      background: #ff9800;
+      color: white;
+      font-weight: bold;
+    }
+    .grid-container {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 20px;
+      margin-bottom: 20px;
+    }
+    .card {
+      background: var(--card-bg);
+      padding: 20px;
+      border-radius: 10px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+      text-align: center;
+    }
+    .sensor-value {
+      font-size: 48px;
+      font-weight: bold;
+      margin: 15px 0;
+    }
+    .temp-display { color: var(--temp-color); }
+    .hum-display { color: var(--hum-color); }
+    .threshold-note { font-size: 13px; color: #666; }
+
+    .control-panel {
+      display: flex;
+      justify-content: space-around;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: 15px;
+    }
+    .btn-control {
+      padding: 12px 20px;
+      font-size: 15px;
+      font-weight: bold;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: 0.15s;
+      min-width: 180px;
+    }
+    .btn-off { background-color: #e0e0e0; color: #333; }
+    .btn-on-pump { background-color: #e53935; color: white; }
+    .btn-on-fan { background-color: #1e88e5; color: white; }
+    .btn-mode { background-color: #6a1b9a; color: white; }
+    .btn-control:active { transform: scale(0.96); }
+    .chart-container {
+      position: relative;
+      height: 260px;
+      width: 100%;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="header">
+    <h1>HỆ THỐNG GIÁM SÁT VƯỜN CÀ PHÊ & HỒ TIÊU</h1>
+    <div class="status-bar">
+      Trạng thái MQTT: <span id="mqtt-status" class="badge">Đang kết nối...</span> | 
+      Chế độ hiện tại: <span class="mode-display badge">AUTO</span>
+    </div>
+  </div>
+
+  <div class="grid-container">
+    <div class="card">
+      <h3>NHIỆT ĐỘ MÔI TRƯỜNG</h3>
+      <div class="sensor-value temp-display">-- °C</div>
+      <p class="threshold-note">Dữ liệu đọc từ cảm biến DHT22</p>
+    </div>
+
+    <div class="card">
+      <h3>ĐỘ ẨM VƯỜN CÂY</h3>
+      <div class="sensor-value hum-display">-- %</div>
+      <p class="threshold-note">Ngưỡng ổn định yêu cầu: <strong>40% – 60%</strong></p>
+    </div>
+
+    <div class="card">
+      <h3>ĐIỀU KHIỂN CƠ CẤU CHẤP HÀNH</h3>
+      <p class="threshold-note">Nhấn nút Bơm/Quạt sẽ chuyển sang chế độ <strong>MANUAL</strong></p>
+      <div class="control-panel">
+        <button id="btn-pump" class="btn-control btn-off" onclick="togglePump()">
+          MÁY BƠM: TẮT
+        </button>
+        <button id="btn-fan" class="btn-control btn-off" onclick="toggleFan()">
+          QUẠT HÚT: TẮT
+        </button>
+        <button id="btn-mode" class="btn-control btn-mode" onclick="toggleMode()">
+          Chuyển sang: MANUAL
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <div class="grid-container">
+    <div class="card">
+      <h3>BIỂU ĐỒ NHIỆT ĐỘ THEO THỜI GIAN THỰC (°C)</h3>
+      <div class="chart-container">
+        <canvas id="tempChart"></canvas>
+      </div>
+    </div>
+    <div class="card">
+      <h3>BIỂU ĐỒ ĐỘ ẨM THEO THỜI GIAN THỰC (%)</h3>
+      <div class="chart-container">
+        <canvas id="humChart"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const maxDataPoints = 15;
+    
+    const tempCtx = document.getElementById('tempChart').getContext('2d');
+    const tempChart = new Chart(tempCtx, {
+      type: 'line',
+      data: {
+        labels: [],
+        datasets: [{
+          label: 'Nhiệt độ (°C)',
+          data: [],
+          borderColor: '#e53935',
+          backgroundColor: 'rgba(229, 57, 53, 0.1)',
+          borderWidth: 2,
+          fill: true,
+          tension: 0.3
+        }]
+      },
+      options: { responsive: true, maintainAspectRatio: false, animation: { duration: 200 } }
+    });
+
+    const humCtx = document.getElementById('humChart').getContext('2d');
+    const humChart = new Chart(humCtx, {
+      type: 'line',
+      data: {
+        labels: [],
+        datasets: [{
+          label: 'Độ ẩm (%)',
+          data: [],
+          borderColor: '#1e88e5',
+          backgroundColor: 'rgba(30, 136, 229, 0.1)',
+          borderWidth: 2,
+          fill: true,
+          tension: 0.3
+        }]
+      },
+      options: { 
+        responsive: true, 
+        maintainAspectRatio: false,
+        animation: { duration: 200 },
+        scales: { y: { min: 0, max: 100 } }
+      }
+    });
+
+    function updateCharts(temp, hum) {
+      const now = new Date().toLocaleTimeString();
+      tempChart.data.labels.push(now);
+      tempChart.data.datasets[0].data.push(temp);
+      if (tempChart.data.labels.length > maxDataPoints) {
+        tempChart.data.labels.shift();
+        tempChart.data.datasets[0].data.shift();
+      }
+      tempChart.update();
+
+      humChart.data.labels.push(now);
+      humChart.data.datasets[0].data.push(hum);
+      if (humChart.data.labels.length > maxDataPoints) {
+        humChart.data.labels.shift();
+        humChart.data.datasets[0].data.shift();
+      }
+      humChart.update();
+    }
+
+    const broker = "broker.emqx.io";
+    const port = 8083;
+    const clientId = "WebFast_" + parseInt(Math.random() * 100000, 10);
+    
+    const topicSub = "vuon_cn_pro/data";
+    const topicPub = "vuon_cn_pro/control";
+
+    let currentPumpState = 0;
+    let currentFanState = 0;
+    let currentMode = "AUTO";
+
+    const client = new Paho.MQTT.Client(broker, port, clientId);
+
+    // Hàm cập nhật giao diện Nút bấm ngay lập tức
+    function renderButtonsUI() {
+      document.querySelector(".mode-display").innerText = currentMode;
+
+      const btnPump = document.getElementById("btn-pump");
+      if (currentPumpState === 1) {
+        btnPump.innerText = "MÁY BƠM: ĐANG BẬT";
+        btnPump.className = "btn-control btn-on-pump";
+      } else {
+        btnPump.innerText = "MÁY BƠM: ĐANG TẮT";
+        btnPump.className = "btn-control btn-off";
+      }
+
+      const btnFan = document.getElementById("btn-fan");
+      if (currentFanState === 1) {
+        btnFan.innerText = "QUẠT HÚT: ĐANG BẬT";
+        btnFan.className = "btn-control btn-on-fan";
+      } else {
+        btnFan.innerText = "QUẠT HÚT: ĐANG TẮT";
+        btnFan.className = "btn-control btn-off";
+      }
+
+      const btnMode = document.getElementById("btn-mode");
+      btnMode.innerText = (currentMode === "AUTO") ? "Chuyển sang: MANUAL" : "Chuyển sang: AUTO";
+    }
+
+    client.onConnectionLost = function () {
+      document.getElementById("mqtt-status").innerText = "Mất kết nối!";
+      document.getElementById("mqtt-status").style.background = "#e53935";
+      setTimeout(connectMQTT, 2000);
+    };
+
+    client.onMessageArrived = function (message) {
+      try {
+        const data = JSON.parse(message.payloadString);
+        
+        document.querySelector(".temp-display").innerText = data.temp.toFixed(1) + " °C";
+        document.querySelector(".hum-display").innerText = data.hum.toFixed(1) + " %";
+
+        currentPumpState = data.pump;
+        currentFanState = data.fan;
+        currentMode = data.mode;
+
+        renderButtonsUI();
+        updateCharts(data.temp, data.hum);
+      } catch (e) {
+        console.error("Lỗi đọc JSON:", e);
+      }
+    };
+
+    function connectMQTT() {
+      client.connect({
+        keepAliveInterval: 15,
+        onSuccess: function () {
+          document.getElementById("mqtt-status").innerText = "Đã kết nối (Tốc độ cao)";
+          document.getElementById("mqtt-status").style.background = "#43a047";
+          client.subscribe(topicSub);
+        },
+        onFailure: function () {
+          document.getElementById("mqtt-status").innerText = "Lỗi kết nối!";
+          setTimeout(connectMQTT, 3000);
+        }
+      });
+    }
+
+    function sendCommand(payloadObj) {
+      if (client.isConnected()) {
+        const message = new Paho.MQTT.Message(JSON.stringify(payloadObj));
+        message.destinationName = topicPub;
+        client.send(message);
+      } else {
+        alert("Chưa kết nối được với MQTT Broker!");
+      }
+    }
+
+    // CẬP NHẬT GIAO DIỆN TỨC THỜI (Optimistic UI) KHI BẤM NÚT
+    function togglePump() {
+      currentPumpState = (currentPumpState === 1) ? 0 : 1;
+      currentMode = "MANUAL";
+      renderButtonsUI(); // Đổi màu nút ngay trong 0.01s
+      sendCommand({ cmd: "PUMP", val: currentPumpState });
+    }
+
+    function toggleFan() {
+      currentFanState = (currentFanState === 1) ? 0 : 1;
+      currentMode = "MANUAL";
+      renderButtonsUI();
+      sendCommand({ cmd: "FAN", val: currentFanState });
+    }
+
+    function toggleMode() {
+      currentMode = (currentMode === "AUTO") ? "MANUAL" : "AUTO";
+      renderButtonsUI();
+      sendCommand({ cmd: "MODE", val: currentMode });
+    }
+
+    window.onload = connectMQTT;
+  </script>
+</body>
+</html>
